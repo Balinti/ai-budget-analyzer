@@ -1,12 +1,12 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
+import { useAuth } from '@/lib/hooks/useAuth'
+import { useDataAccess } from '@/lib/hooks/useDataAccess'
 import { detectRecurring, groupToAnchorSuggestion } from '@/lib/forecast/detection'
-import { formatCents, CADENCE_LABELS, getPlanTier } from '@/lib/forecast/utils'
+import { formatCents, CADENCE_LABELS } from '@/lib/forecast/utils'
 import { getMaxAnchors } from '@/lib/forecast/engine'
-import type { Anchor, Transaction, AnchorType, AnchorCadence } from '@/types/database'
+import type { Anchor, AnchorType, AnchorCadence, PlanTier } from '@/types/database'
 
 export default function AnchorsPage() {
   const [anchors, setAnchors] = useState<Anchor[]>([])
@@ -15,65 +15,50 @@ export default function AnchorsPage() {
   const [saving, setSaving] = useState(false)
   const [showAddModal, setShowAddModal] = useState(false)
   const [editingAnchor, setEditingAnchor] = useState<Anchor | null>(null)
-  const [tier, setTier] = useState<'free' | 'plus' | 'pro'>('free')
 
-  const router = useRouter()
-  const supabase = createClient()
+  const { isLoading: authLoading } = useAuth()
+  const {
+    getAnchors,
+    getTransactions,
+    insertAnchor,
+    updateAnchor: updateAnchorData,
+    deleteAnchor: deleteAnchorData,
+    isGuest,
+  } = useDataAccess()
+
+  // Guests are on free tier
+  const tier: PlanTier = 'free'
 
   useEffect(() => {
+    if (authLoading) return
     loadData()
-  }, [])
+  }, [authLoading])
 
   const loadData = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-
-      // Load subscription for tier
-      const { data: subscription } = await supabase
-        .from('subscriptions')
-        .select('*')
-        .eq('user_id', user.id)
-        .single()
-
-      setTier(getPlanTier(subscription))
-
       // Load existing anchors
-      const { data: existingAnchorsData } = await supabase
-        .from('anchors')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('type', { ascending: true })
-        .order('name', { ascending: true })
-
-      const existingAnchors = (existingAnchorsData || []) as Anchor[]
+      const existingAnchors = await getAnchors()
       setAnchors(existingAnchors)
 
       // Load transactions for detection
-      const { data: transactions } = await supabase
-        .from('transactions')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('txn_date', { ascending: false })
-        .limit(200)
+      const transactions = await getTransactions(200)
 
       if (transactions && transactions.length > 0) {
         // Detect recurring patterns
-        const detected = detectRecurring(transactions as Transaction[])
+        const detected = detectRecurring(transactions)
 
         // Convert to anchor suggestions
         const newSuggestions = detected
           .filter((group) => {
             // Filter out patterns that match existing anchors
-            const existingNames = existingAnchors?.map((a) =>
-              a.name.toLowerCase()
-            ) || []
-            return !existingNames.some((name) =>
-              group.description.toLowerCase().includes(name) ||
-              name.includes(group.description.toLowerCase().split(' ')[0])
+            const existingNames = existingAnchors?.map((a) => a.name.toLowerCase()) || []
+            return !existingNames.some(
+              (name) =>
+                group.description.toLowerCase().includes(name) ||
+                name.includes(group.description.toLowerCase().split(' ')[0])
             )
           })
-          .map((group) => groupToAnchorSuggestion(group, user.id))
+          .map((group) => groupToAnchorSuggestion(group, 'temp_user'))
           .slice(0, 10) // Limit suggestions
 
         setSuggestions(newSuggestions as Anchor[])
@@ -88,34 +73,33 @@ export default function AnchorsPage() {
   const confirmAnchor = async (anchor: Partial<Anchor>) => {
     setSaving(true)
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-
       // Check limit
       const confirmedCount = anchors.filter((a) => a.confirmed).length
       const maxAnchors = getMaxAnchors(tier)
 
       if (confirmedCount >= maxAnchors) {
-        alert(`You've reached the limit of ${maxAnchors} bills/income on the ${tier} plan. Upgrade to add more.`)
+        alert(
+          `You've reached the limit of ${maxAnchors} bills/income on the ${tier} plan. Upgrade to add more.`
+        )
         return
       }
 
-      const { data, error } = await (supabase
-        .from('anchors') as any)
-        .insert({
-          ...anchor,
-          user_id: user.id,
-          confirmed: true,
-        })
-        .select()
-        .single()
+      const newAnchor = await insertAnchor({
+        type: anchor.type!,
+        name: anchor.name!,
+        cadence: anchor.cadence!,
+        due_day: anchor.due_day ?? null,
+        next_due_date: anchor.next_due_date ?? null,
+        amount_min_cents: anchor.amount_min_cents!,
+        amount_max_cents: anchor.amount_max_cents!,
+        required: anchor.required ?? true,
+        variable: anchor.variable ?? false,
+        confirmed: true,
+        last_matched_txn_id: null,
+      })
 
-      if (error) throw error
-
-      setAnchors((prev) => [...prev, data as Anchor])
-      setSuggestions((prev) =>
-        prev.filter((s) => s.name !== anchor.name)
-      )
+      setAnchors((prev) => [...prev, newAnchor])
+      setSuggestions((prev) => prev.filter((s) => s.name !== anchor.name))
     } catch (error) {
       console.error('Failed to confirm anchor:', error)
     } finally {
@@ -126,16 +110,8 @@ export default function AnchorsPage() {
   const updateAnchor = async (id: string, updates: Partial<Anchor>) => {
     setSaving(true)
     try {
-      const { error } = await (supabase
-        .from('anchors') as any)
-        .update(updates)
-        .eq('id', id)
-
-      if (error) throw error
-
-      setAnchors((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, ...updates } : a))
-      )
+      await updateAnchorData(id, updates)
+      setAnchors((prev) => prev.map((a) => (a.id === id ? { ...a, ...updates } : a)))
       setEditingAnchor(null)
     } catch (error) {
       console.error('Failed to update anchor:', error)
@@ -148,13 +124,7 @@ export default function AnchorsPage() {
     if (!confirm('Are you sure you want to delete this?')) return
 
     try {
-      const { error } = await (supabase
-        .from('anchors') as any)
-        .delete()
-        .eq('id', id)
-
-      if (error) throw error
-
+      await deleteAnchorData(id)
       setAnchors((prev) => prev.filter((a) => a.id !== id))
     } catch (error) {
       console.error('Failed to delete anchor:', error)
@@ -170,7 +140,7 @@ export default function AnchorsPage() {
   const bills = confirmedAnchors.filter((a) => a.type === 'bill')
   const income = confirmedAnchors.filter((a) => a.type === 'income')
 
-  if (loading) {
+  if (loading || authLoading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
@@ -183,9 +153,7 @@ export default function AnchorsPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-            Bills & Income
-          </h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Bills & Income</h1>
           <p className="text-gray-600 dark:text-gray-400">
             Manage your recurring bills and income sources.
           </p>
@@ -216,8 +184,8 @@ export default function AnchorsPage() {
             Detected Recurring Patterns
           </h2>
           <p className="text-gray-600 dark:text-gray-400 mb-4">
-            We found these potential recurring bills/income in your transactions.
-            Confirm the ones you want to track.
+            We found these potential recurring bills/income in your transactions. Confirm the ones
+            you want to track.
           </p>
           <div className="space-y-3">
             {suggestions.map((suggestion, i) => (
@@ -248,10 +216,7 @@ export default function AnchorsPage() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => dismissSuggestion(suggestion.name)}
-                    className="btn-ghost text-sm"
-                  >
+                  <button onClick={() => dismissSuggestion(suggestion.name)} className="btn-ghost text-sm">
                     Dismiss
                   </button>
                   <button
@@ -349,9 +314,7 @@ function AnchorRow({
     <div className="flex items-center justify-between p-4 border border-gray-200 dark:border-gray-700 rounded-lg">
       <div>
         <div className="flex items-center gap-2">
-          <span className="font-medium text-gray-900 dark:text-white">
-            {anchor.name}
-          </span>
+          <span className="font-medium text-gray-900 dark:text-white">{anchor.name}</span>
           {!anchor.required && (
             <span className="px-2 py-0.5 text-xs bg-gray-100 dark:bg-gray-700 text-gray-500 rounded">
               optional
@@ -375,10 +338,7 @@ function AnchorRow({
         <button onClick={onEdit} className="btn-ghost text-sm">
           Edit
         </button>
-        <button
-          onClick={onDelete}
-          className="text-danger-600 hover:text-danger-700 p-2"
-        >
+        <button onClick={onDelete} className="text-danger-600 hover:text-danger-700 p-2">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path
               strokeLinecap="round"
@@ -547,9 +507,7 @@ function AnchorModal({
                 onChange={(e) => setRequired(e.target.checked)}
                 className="rounded border-gray-300"
               />
-              <span className="text-sm text-gray-700 dark:text-gray-300">
-                Required
-              </span>
+              <span className="text-sm text-gray-700 dark:text-gray-300">Required</span>
             </label>
 
             <label className="flex items-center gap-2">
@@ -559,18 +517,12 @@ function AnchorModal({
                 onChange={(e) => setVariable(e.target.checked)}
                 className="rounded border-gray-300"
               />
-              <span className="text-sm text-gray-700 dark:text-gray-300">
-                Variable amount
-              </span>
+              <span className="text-sm text-gray-700 dark:text-gray-300">Variable amount</span>
             </label>
           </div>
 
           <div className="flex gap-3 pt-4">
-            <button
-              type="button"
-              onClick={onClose}
-              className="btn-secondary flex-1"
-            >
+            <button type="button" onClick={onClose} className="btn-secondary flex-1">
               Cancel
             </button>
             <button

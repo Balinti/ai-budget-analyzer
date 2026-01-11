@@ -2,8 +2,8 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
-import { format, subDays, addDays } from 'date-fns'
+import { useDataAccess } from '@/lib/hooks/useDataAccess'
+import { format, addDays } from 'date-fns'
 
 const SAMPLE_TRANSACTIONS = [
   { days: -30, description: 'Paycheck - ABC Company', amount: 250000 },
@@ -43,8 +43,8 @@ const SAMPLE_ANCHORS = [
     name: 'Rent Payment',
     cadence: 'monthly' as const,
     due_day: 1,
-    amount_min_cents: 150000,
-    amount_max_cents: 150000,
+    amount_min_cents: -150000,
+    amount_max_cents: -150000,
     required: true,
     variable: false,
     confirmed: true,
@@ -54,8 +54,8 @@ const SAMPLE_ANCHORS = [
     name: 'Electric Company',
     cadence: 'monthly' as const,
     due_day: 3,
-    amount_min_cents: 10000,
-    amount_max_cents: 15000,
+    amount_min_cents: -10000,
+    amount_max_cents: -15000,
     required: true,
     variable: true,
     confirmed: true,
@@ -65,8 +65,8 @@ const SAMPLE_ANCHORS = [
     name: 'Phone Bill',
     cadence: 'monthly' as const,
     due_day: 10,
-    amount_min_cents: 8500,
-    amount_max_cents: 8500,
+    amount_min_cents: -8500,
+    amount_max_cents: -8500,
     required: true,
     variable: false,
     confirmed: true,
@@ -76,8 +76,8 @@ const SAMPLE_ANCHORS = [
     name: 'Netflix',
     cadence: 'monthly' as const,
     due_day: 4,
-    amount_min_cents: 1599,
-    amount_max_cents: 1599,
+    amount_min_cents: -1599,
+    amount_max_cents: -1599,
     required: false,
     variable: false,
     confirmed: true,
@@ -87,48 +87,40 @@ const SAMPLE_ANCHORS = [
 export function LoadSampleDataButton() {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
-  const supabase = createClient()
+  const { insertTransactions, insertAnchor, updateBalance } = useDataAccess()
 
   const loadSampleData = async () => {
     setLoading(true)
 
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return
-
       const today = new Date()
 
       // Insert sample transactions
       const transactions = SAMPLE_TRANSACTIONS.map((t) => ({
-        user_id: user.id,
         txn_date: format(addDays(today, t.days), 'yyyy-MM-dd'),
         description: t.description,
         amount_cents: t.amount,
         source: 'csv' as const,
         pending: false,
+        account: null,
       }))
 
-      await (supabase.from('transactions') as any).insert(transactions)
+      await insertTransactions(transactions)
 
       // Insert sample anchors
-      const anchors = SAMPLE_ANCHORS.map((a) => ({
-        user_id: user.id,
-        ...a,
-        next_due_date: null,
-        last_matched_txn_id: null,
-      }))
-
-      await (supabase.from('anchors') as any).insert(anchors)
+      for (const anchor of SAMPLE_ANCHORS) {
+        await insertAnchor({
+          ...anchor,
+          next_due_date: null,
+          last_matched_txn_id: null,
+        })
+      }
 
       // Update balance to something reasonable
-      await (supabase
-        .from('manual_balances') as any)
-        .update({
-          checking_cents: 435000, // $4,350
-          savings_cents: 100000, // $1,000
-          updated_at: new Date().toISOString(),
-        })
-        .eq('user_id', user.id)
+      await updateBalance({
+        checking_cents: 435000, // $4,350
+        savings_cents: 100000, // $1,000
+      })
 
       router.refresh()
     } catch (error) {
@@ -139,11 +131,7 @@ export function LoadSampleDataButton() {
   }
 
   return (
-    <button
-      onClick={loadSampleData}
-      disabled={loading}
-      className="btn-ghost text-sm"
-    >
+    <button onClick={loadSampleData} disabled={loading} className="btn-ghost text-sm">
       {loading ? 'Loading...' : 'Load Sample Data'}
     </button>
   )

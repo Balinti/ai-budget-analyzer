@@ -1,13 +1,14 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase/client'
-import { CURRENCIES, TIMEZONES, formatCents, parseToCents } from '@/lib/forecast/utils'
+import { useAuth } from '@/lib/hooks/useAuth'
+import { useDataAccess } from '@/lib/hooks/useDataAccess'
+import { CURRENCIES, TIMEZONES, parseToCents } from '@/lib/forecast/utils'
 
 export default function OnboardingPage() {
   const [step, setStep] = useState(1)
-  const [timezone, setTimezone] = useState('America/New_York')
+  const [timezone, setTimezone] = useState('')
   const [currency, setCurrency] = useState('USD')
   const [buffer, setBuffer] = useState('200')
   const [checkingBalance, setCheckingBalance] = useState('')
@@ -17,43 +18,55 @@ export default function OnboardingPage() {
   const [error, setError] = useState<string | null>(null)
 
   const router = useRouter()
-  const supabase = createClient()
+  const { isLoading: authLoading } = useAuth()
+  const { updateProfile, updateBalance, getProfile } = useDataAccess()
+
+  // Set default timezone from browser
+  useEffect(() => {
+    const detectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    if (TIMEZONES.includes(detectedTimezone)) {
+      setTimezone(detectedTimezone)
+    } else {
+      setTimezone('America/New_York')
+    }
+  }, [])
+
+  // Check if already onboarded
+  useEffect(() => {
+    if (authLoading) return
+
+    async function checkOnboarding() {
+      try {
+        const profile = await getProfile()
+        if (profile?.onboarding_completed) {
+          router.push('/app')
+        }
+      } catch (err) {
+        // Profile doesn't exist yet, continue with onboarding
+      }
+    }
+
+    checkOnboarding()
+  }, [authLoading, getProfile, router])
 
   const handleComplete = async () => {
     setLoading(true)
     setError(null)
 
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) {
-        setError('Not authenticated')
-        return
-      }
-
       // Update profile
-      const { error: profileError } = await (supabase
-        .from('profiles') as any)
-        .update({
-          timezone,
-          currency,
-          buffer_cents: parseToCents(buffer),
-          onboarding_completed: true,
-        })
-        .eq('user_id', user.id)
-
-      if (profileError) throw profileError
+      await updateProfile({
+        timezone,
+        currency,
+        buffer_cents: parseToCents(buffer),
+        onboarding_completed: true,
+      })
 
       // Update balances
-      const { error: balanceError } = await (supabase
-        .from('manual_balances') as any)
-        .update({
-          checking_cents: parseToCents(checkingBalance || '0'),
-          savings_cents: parseToCents(savingsBalance || '0'),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('user_id', user.id)
-
-      if (balanceError) throw balanceError
+      await updateBalance({
+        checking_cents: parseToCents(checkingBalance || '0'),
+        savings_cents: parseToCents(savingsBalance || '0'),
+      })
 
       router.push('/app')
       router.refresh()
@@ -63,6 +76,14 @@ export default function OnboardingPage() {
     } finally {
       setLoading(false)
     }
+  }
+
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
+      </div>
+    )
   }
 
   return (
@@ -85,8 +106,8 @@ export default function OnboardingPage() {
                 s === step
                   ? 'bg-primary-600 text-white'
                   : s < step
-                  ? 'bg-primary-200 text-primary-800'
-                  : 'bg-gray-200 text-gray-600'
+                    ? 'bg-primary-200 text-primary-800'
+                    : 'bg-gray-200 text-gray-600'
               }`}
             >
               {s < step ? (
@@ -115,9 +136,7 @@ export default function OnboardingPage() {
       <div className="card p-6">
         {step === 1 && (
           <div className="space-y-6">
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-              Basic Settings
-            </h2>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Basic Settings</h2>
 
             <div>
               <label htmlFor="timezone" className="label">
@@ -160,7 +179,8 @@ export default function OnboardingPage() {
                 Safety Buffer Amount
               </label>
               <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">
-                This is the minimum amount you want to keep as a cushion. We&apos;ll warn you before you dip below this.
+                This is the minimum amount you want to keep as a cushion. We&apos;ll warn you before
+                you dip below this.
               </p>
               <div className="relative">
                 <span className="absolute left-3 top-2 text-gray-500">$</span>
@@ -267,9 +287,7 @@ export default function OnboardingPage() {
                   className="mt-1"
                 />
                 <div>
-                  <p className="font-medium text-gray-900 dark:text-white">
-                    CSV Upload
-                  </p>
+                  <p className="font-medium text-gray-900 dark:text-white">CSV Upload</p>
                   <p className="text-sm text-gray-600 dark:text-gray-400">
                     Export transactions from your bank and upload them. Works with most banks.
                   </p>
@@ -292,9 +310,7 @@ export default function OnboardingPage() {
                   className="mt-1"
                 />
                 <div>
-                  <p className="font-medium text-gray-900 dark:text-white">
-                    Manual Entry
-                  </p>
+                  <p className="font-medium text-gray-900 dark:text-white">Manual Entry</p>
                   <p className="text-sm text-gray-600 dark:text-gray-400">
                     Add your recurring bills and income manually. Quick setup, no imports needed.
                   </p>
@@ -318,11 +334,7 @@ export default function OnboardingPage() {
               <button onClick={() => setStep(2)} className="btn-secondary flex-1">
                 Back
               </button>
-              <button
-                onClick={handleComplete}
-                disabled={loading}
-                className="btn-primary flex-1"
-              >
+              <button onClick={handleComplete} disabled={loading} className="btn-primary flex-1">
                 {loading ? 'Saving...' : 'Get Started'}
               </button>
             </div>

@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/client'
+import { hasGuestData } from '@/lib/storage/guest-storage'
 
 export default function SignupPage() {
   const [email, setEmail] = useState('')
@@ -53,7 +54,12 @@ export default function SignupPage() {
         return
       }
 
-      router.push('/app/onboarding')
+      // Check if there's guest data to merge
+      if (hasGuestData()) {
+        router.push('/app?showMerge=true')
+      } else {
+        router.push('/app/onboarding')
+      }
       router.refresh()
     } catch (err) {
       setError('An unexpected error occurred')

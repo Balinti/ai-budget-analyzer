@@ -1,9 +1,8 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
-import { createClient } from '@/lib/supabase/client'
+import { useDataAccess } from '@/lib/hooks/useDataAccess'
 import { formatCents } from '@/lib/forecast/utils'
 
 interface ParsedRow {
@@ -39,7 +38,7 @@ export default function UploadPage() {
   const [success, setSuccess] = useState(false)
 
   const router = useRouter()
-  const supabase = createClient()
+  const { insertTransactions } = useDataAccess()
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0]
@@ -102,12 +101,8 @@ export default function UploadPage() {
     setError(null)
 
     try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) throw new Error('Not authenticated')
-
-      // Insert transactions
+      // Insert transactions using the data access hook
       const transactions = result.rows.map((row) => ({
-        user_id: user.id,
         txn_date: row.date,
         description: row.description,
         amount_cents: row.amount_cents,
@@ -116,11 +111,7 @@ export default function UploadPage() {
         source: 'csv' as const,
       }))
 
-      const { error: insertError } = await (supabase
-        .from('transactions') as any)
-        .insert(transactions)
-
-      if (insertError) throw insertError
+      await insertTransactions(transactions)
 
       setSuccess(true)
 
